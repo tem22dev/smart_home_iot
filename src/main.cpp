@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <DHT.h> // Thư viện DHT
 
 const char* ssid = "Huong Duong";
 const char* password = "20122000";
@@ -26,8 +27,10 @@ struct SensorConfig {
   bool status;
 };
 
-SensorConfig sensors[10]; // Mảng lưu cấu hình sensor, tối đa 10 sensor
+SensorConfig sensors[10];
 int sensorCount = 0;
+
+DHT* dhtInstance = nullptr;
 
 void connectWifi() {
   WiFi.begin(ssid, password);
@@ -60,6 +63,10 @@ void callback(char* topic, byte* payload, unsigned int length) {
     }
 
     sensorCount = 0;
+    // Giải phóng instance DHT cũ nếu có
+    delete dhtInstance;
+    dhtInstance = nullptr;
+
     JsonArray sensorArray = doc["sensors"];
     for (JsonObject sensor : sensorArray) {
       sensors[sensorCount].id = sensor["id"].as<String>();
@@ -70,15 +77,15 @@ void callback(char* topic, byte* payload, unsigned int length) {
       sensors[sensorCount].threshold = sensor["threshold"].as<int>();
       sensors[sensorCount].status = sensor["status"].as<bool>();
 
-      if (sensors[sensorCount].type == "input") {
+      if (sensors[sensorCount].type == "DHT") {
+        dhtInstance = new DHT(sensors[sensorCount].pin, DHT22);
+        dhtInstance->begin();
+        Serial.print(sensors[sensorCount].name);
+        Serial.println(" configured as DHT22 with dynamic pin");
+      } else if (sensors[sensorCount].type == "MQ2") {
         pinMode(sensors[sensorCount].pin, INPUT);
         Serial.print(sensors[sensorCount].name);
-        Serial.println(" configured as input");
-      } else if (sensors[sensorCount].type == "output") {
-        pinMode(sensors[sensorCount].pin, OUTPUT);
-        digitalWrite(sensors[sensorCount].pin, sensors[sensorCount].status);
-        Serial.print(sensors[sensorCount].name);
-        Serial.println(sensors[sensorCount].status ? " ON" : " OFF");
+        Serial.println(" configured as MQ2");
       }
       sensorCount++;
     }
@@ -104,6 +111,60 @@ void reconnect() {
   }
 }
 
+void sendSensorData() {
+  for (int i = 0; i < sensorCount; i++) {
+    if (sensors[i].type == "DHT" && dhtInstance) {
+      float temperature = dhtInstance->readTemperature();
+      float humidity = dhtInstance->readHumidity();
+      if (isnan(temperature) || isnan(humidity)) {
+        Serial.println("Failed to read from DHT22");
+        return;
+      }
+
+      // Gửi nhiệt độ
+      if (temperature >= 0) {
+        DynamicJsonDocument doc(128);
+        doc["sensorId"] = sensors[i].id;
+        doc["value"] = temperature;
+        doc["unit"] = "°C";
+        char buffer[128];
+        serializeJson(doc, buffer);
+        client.publish("sensor/data", buffer);
+        Serial.print(sensors[i].name);
+        Serial.print(" Temperature: ");
+        Serial.println(temperature);
+      }
+
+      // Gửi độ ẩm
+      if (humidity >= 0) {
+        DynamicJsonDocument doc(128);
+        doc["sensorId"] = sensors[i].id;
+        doc["value"] = humidity;
+        doc["unit"] = "%";
+        char buffer[128];
+        serializeJson(doc, buffer);
+        client.publish("sensor/data", buffer);
+        Serial.print(sensors[i].name);
+        Serial.print(" Humidity: ");
+        Serial.println(humidity);
+      }
+    } else if (sensors[i].type == "MQ2") {
+      int gasValue = analogRead(sensors[i].pin);
+      if (gasValue >= sensors[i].threshold) {
+        DynamicJsonDocument doc(128);
+        doc["sensorId"] = sensors[i].id;
+        doc["value"] = gasValue;
+        doc["unit"] = ""; // Không có unit cho MQ2
+        char buffer[128];
+        serializeJson(doc, buffer);
+        client.publish("sensor/data", buffer);
+        Serial.print("Gas Sensor: ");
+        Serial.println(gasValue);
+      }
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   connectWifi();
@@ -117,4 +178,6 @@ void loop() {
     reconnect();
   }
   client.loop();
+  sendSensorData();
+  delay(2000);
 }
