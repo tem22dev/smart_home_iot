@@ -25,14 +25,14 @@ struct SensorConfig {
   String unit;
   int threshold;
   bool status;
+  DHT* dht;
 };
 
 SensorConfig sensors[10];
 int sensorCount = 0;
 
-DHT* dhtInstance = nullptr;
 bool deviceStatus = false;
-bool isStatusReceived = false; // Biến kiểm tra xem đã nhận trạng thái chưa
+bool isStatusReceived = false;
 
 void connectWifi() {
   WiFi.begin(ssid, password);
@@ -52,11 +52,12 @@ void callback(char* topic, byte* payload, unsigned int length) {
   }
   Serial.print("Message received [");
   Serial.print(topic);
-  Serial.println("] ");
+  Serial.print("] length: ");
+  Serial.println(length);
   Serial.println(message);
 
   if (strcmp(topic, ("config/" + String(deviceCode)).c_str()) == 0) {
-    DynamicJsonDocument doc(2048);
+    DynamicJsonDocument doc(4096);
     DeserializationError error = deserializeJson(doc, message);
     if (error) {
       Serial.print("deserializeJson() failed: ");
@@ -65,34 +66,46 @@ void callback(char* topic, byte* payload, unsigned int length) {
     }
 
     sensorCount = 0;
-    delete dhtInstance;
-    dhtInstance = nullptr;
+    for (int i = 0; i < sensorCount; i++) {
+      delete sensors[i].dht;
+    }
 
-    JsonArray sensorArray = doc["sensors"];
-    for (JsonObject sensor : sensorArray) {
-      sensors[sensorCount].id = sensor["id"].as<String>();
-      sensors[sensorCount].name = sensor["name"].as<String>();
-      sensors[sensorCount].pin = sensor["pin"].as<int>();
-      sensors[sensorCount].type = sensor["type"].as<String>();
-      sensors[sensorCount].unit = sensor["unit"].as<String>();
-      sensors[sensorCount].threshold = sensor["threshold"].as<int>();
-      sensors[sensorCount].status = sensor["status"].as<bool>();
+    if (doc.containsKey("sensors")) {
+      JsonArray sensorArray = doc["sensors"];
+      Serial.print("sensorArray size: ");
+      Serial.println(sensorArray.size());
+      for (JsonObject sensor : sensorArray) {
+        if (sensorCount >= 10) {
+          Serial.println("Max sensor limit reached!");
+          break;
+        }
+        sensors[sensorCount].id = sensor["id"].as<String>();
+        sensors[sensorCount].name = sensor["name"].as<String>();
+        sensors[sensorCount].pin = sensor["pin"].as<int>();
+        sensors[sensorCount].type = sensor["type"].as<String>();
+        sensors[sensorCount].unit = sensor["unit"].as<String>();
+        sensors[sensorCount].threshold = sensor["threshold"].as<int>();
+        sensors[sensorCount].status = sensor["status"].as<bool>();
+        sensors[sensorCount].dht = nullptr;
 
-      if (sensors[sensorCount].type == "DHT") {
-        dhtInstance = new DHT(sensors[sensorCount].pin, DHT22);
-        dhtInstance->begin();
-        Serial.print(sensors[sensorCount].name);
-        Serial.println(" configured as DHT22 with dynamic pin");
-      } else if (sensors[sensorCount].type == "MQ2") {
-        pinMode(sensors[sensorCount].pin, INPUT);
-        Serial.print(sensors[sensorCount].name);
-        Serial.println(" configured as MQ2");
+        if (sensors[sensorCount].type == "DHT") {
+          sensors[sensorCount].dht = new DHT(sensors[sensorCount].pin, DHT22);
+          sensors[sensorCount].dht->begin();
+          Serial.print(sensors[sensorCount].name);
+          Serial.println(" configured as DHT22 with dynamic pin");
+        } else if (sensors[sensorCount].type == "MQ2") {
+          pinMode(sensors[sensorCount].pin, INPUT);
+          Serial.print(sensors[sensorCount].name);
+          Serial.println(" configured as MQ2");
+        }
+        sensorCount++;
       }
-      sensorCount++;
+    } else {
+      Serial.println("No 'sensors' key found in config JSON!");
     }
     Serial.println("Configuration applied");
   } else if (strcmp(topic, ("status/" + String(deviceCode)).c_str()) == 0) {
-    DynamicJsonDocument doc(128);
+    DynamicJsonDocument doc(1024);
     DeserializationError error = deserializeJson(doc, message);
     if (error) {
       Serial.print("deserializeJson() failed: ");
@@ -102,9 +115,32 @@ void callback(char* topic, byte* payload, unsigned int length) {
     bool newStatus = doc["status"].as<bool>();
     if (deviceStatus != newStatus) {
       deviceStatus = newStatus;
-      isStatusReceived = true; // Đánh dấu đã nhận trạng thái
+      isStatusReceived = true;
       Serial.print("Device status updated to: ");
       Serial.println(deviceStatus);
+    }
+  } else if (String(topic).startsWith("sensor/status/")) {
+    String sensorId = String(topic).substring(strlen("sensor/status/"));
+    DynamicJsonDocument doc(1024);
+    DeserializationError error = deserializeJson(doc, message);
+    if (error) {
+      Serial.print("deserializeJson() failed: ");
+      Serial.println(error.c_str());
+      return;
+    }
+    bool newStatus = doc["status"].as<bool>();
+
+    for (int i = 0; i < sensorCount; i++) {
+      if (sensors[i].id == sensorId) {
+        if (sensors[i].status != newStatus) {
+          sensors[i].status = newStatus;
+          Serial.print("Sensor ");
+          Serial.print(sensors[i].name);
+          Serial.print(" status updated to: ");
+          Serial.println(newStatus);
+        }
+        break;
+      }
     }
   }
 }
@@ -118,10 +154,13 @@ void reconnect() {
       Serial.println("connected");
       client.subscribe(("config/" + String(deviceCode)).c_str());
       client.subscribe(("status/" + String(deviceCode)).c_str());
-      client.publish("request/config", deviceCode);
-      // Yêu cầu trạng thái Device ngay khi kết nối
-      client.publish(("status/" + String(deviceCode)).c_str(), ""); // Yêu cầu trạng thái từ server
-      isStatusReceived = false; // Đặt lại trạng thái khi kết nối lại
+      client.subscribe("sensor/status/#");
+      Serial.println("Subscribed to topics");
+      client.publish("request/config", deviceCode, true); // Sử dụng QoS 1
+      client.publish(("status/" + String(deviceCode)).c_str(), "", true); // Sử dụng QoS 1
+      Serial.println("Published requests");
+      isStatusReceived = false;
+      delay(2000); // Chờ 2 giây để đảm bảo nhận thông điệp
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -140,56 +179,71 @@ void sendSensorData() {
     Serial.println("Device is disabled, skipping sensor data transmission");
     return;
   }
+  if (sensorCount == 0) {
+    Serial.println("No sensors configured, waiting for config...");
+    return;
+  }
 
   for (int i = 0; i < sensorCount; i++) {
-    if (sensors[i].type == "DHT" && dhtInstance) {
-      float temperature = dhtInstance->readTemperature();
-      float humidity = dhtInstance->readHumidity();
+    if (sensors[i].type == "DHT" && sensors[i].dht) {
+      float temperature = sensors[i].dht->readTemperature();
+      float humidity = sensors[i].dht->readHumidity();
       if (isnan(temperature) || isnan(humidity)) {
-        Serial.println("Failed to read from DHT22");
-        return;
+        Serial.print("Failed to read from ");
+        Serial.print(sensors[i].name);
+        Serial.println(" DHT22");
+        continue;
       }
 
-      // Gửi nhiệt độ
-      if (temperature >= 0) {
-        DynamicJsonDocument doc(128);
-        doc["sensorId"] = sensors[i].id;
-        doc["value"] = temperature;
-        doc["unit"] = "°C";
-        char buffer[128];
-        serializeJson(doc, buffer);
-        client.publish("sensor/data", buffer);
+      if (sensors[i].status) {
+        if (temperature >= 0) {
+          DynamicJsonDocument doc(1024);
+          doc["sensorId"] = sensors[i].id;
+          doc["value"] = temperature;
+          doc["unit"] = "°C";
+          char buffer[128];
+          serializeJson(doc, buffer);
+          client.publish("sensor/data", buffer);
+          Serial.print(sensors[i].name);
+          Serial.print(" Temperature: ");
+          Serial.println(temperature);
+        }
+        if (humidity >= 0) {
+          DynamicJsonDocument doc(1024);
+          doc["sensorId"] = sensors[i].id;
+          doc["value"] = humidity;
+          doc["unit"] = "%";
+          char buffer[128];
+          serializeJson(doc, buffer);
+          client.publish("sensor/data", buffer);
+          Serial.print(sensors[i].name);
+          Serial.print(" Humidity: ");
+          Serial.println(humidity);
+        }
+      } else {
+        Serial.print("Sensor ");
         Serial.print(sensors[i].name);
-        Serial.print(" Temperature: ");
-        Serial.println(temperature);
-      }
-
-      // Gửi độ ẩm
-      if (humidity >= 0) {
-        DynamicJsonDocument doc(128);
-        doc["sensorId"] = sensors[i].id;
-        doc["value"] = humidity;
-        doc["unit"] = "%";
-        char buffer[128];
-        serializeJson(doc, buffer);
-        client.publish("sensor/data", buffer);
-        Serial.print(sensors[i].name);
-        Serial.print(" Humidity: ");
-        Serial.println(humidity);
+        Serial.println(" is disabled, data not sent (but still reading)");
       }
     } else if (sensors[i].type == "MQ2") {
       int gasValue = analogRead(sensors[i].pin);
-      if (gasValue >= sensors[i].threshold) {
-        DynamicJsonDocument doc(128);
+      if (sensors[i].status || gasValue >= sensors[i].threshold) {
+        DynamicJsonDocument doc(1024);
         doc["sensorId"] = sensors[i].id;
         doc["value"] = gasValue;
-        doc["unit"] = ""; // Không có unit cho MQ2
+        doc["unit"] = sensors[i].unit;
         char buffer[128];
         serializeJson(doc, buffer);
         client.publish("sensor/data", buffer);
-        Serial.print("Gas Sensor: ");
-        Serial.println(gasValue);
+      } else if (!sensors[i].status) {
+        Serial.print("Sensor ");
+        Serial.print(sensors[i].name);
+        Serial.println(" is disabled, data not sent (but still reading)");
       }
+      Serial.print("Gas Sensor ");
+      Serial.print(sensors[i].name);
+      Serial.print(": ");
+      Serial.println(gasValue);
     }
   }
 }
