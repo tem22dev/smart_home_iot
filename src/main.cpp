@@ -1,7 +1,7 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
-#include <DHT.h> // Thư viện DHT
+#include <DHT.h>
 
 const char* ssid = "Huong Duong";
 const char* password = "20122000";
@@ -12,7 +12,7 @@ const int mqtt_port = 1883;
 const char* mqtt_user = "";
 const char* mqtt_password = "";
 
-const char* deviceCode = "ESP32_ONE"; // ID duy nhất của ESP32
+const char* deviceCode = "ESP32_ONE";
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -31,6 +31,8 @@ SensorConfig sensors[10];
 int sensorCount = 0;
 
 DHT* dhtInstance = nullptr;
+bool deviceStatus = false;
+bool isStatusReceived = false; // Biến kiểm tra xem đã nhận trạng thái chưa
 
 void connectWifi() {
   WiFi.begin(ssid, password);
@@ -63,7 +65,6 @@ void callback(char* topic, byte* payload, unsigned int length) {
     }
 
     sensorCount = 0;
-    // Giải phóng instance DHT cũ nếu có
     delete dhtInstance;
     dhtInstance = nullptr;
 
@@ -90,6 +91,21 @@ void callback(char* topic, byte* payload, unsigned int length) {
       sensorCount++;
     }
     Serial.println("Configuration applied");
+  } else if (strcmp(topic, ("status/" + String(deviceCode)).c_str()) == 0) {
+    DynamicJsonDocument doc(128);
+    DeserializationError error = deserializeJson(doc, message);
+    if (error) {
+      Serial.print("deserializeJson() failed: ");
+      Serial.println(error.c_str());
+      return;
+    }
+    bool newStatus = doc["status"].as<bool>();
+    if (deviceStatus != newStatus) {
+      deviceStatus = newStatus;
+      isStatusReceived = true; // Đánh dấu đã nhận trạng thái
+      Serial.print("Device status updated to: ");
+      Serial.println(deviceStatus);
+    }
   }
 }
 
@@ -101,7 +117,11 @@ void reconnect() {
     if (client.connect(clientId.c_str(), mqtt_user, mqtt_password)) {
       Serial.println("connected");
       client.subscribe(("config/" + String(deviceCode)).c_str());
+      client.subscribe(("status/" + String(deviceCode)).c_str());
       client.publish("request/config", deviceCode);
+      // Yêu cầu trạng thái Device ngay khi kết nối
+      client.publish(("status/" + String(deviceCode)).c_str(), ""); // Yêu cầu trạng thái từ server
+      isStatusReceived = false; // Đặt lại trạng thái khi kết nối lại
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -112,6 +132,15 @@ void reconnect() {
 }
 
 void sendSensorData() {
+  if (!isStatusReceived) {
+    Serial.println("Waiting for device status...");
+    return;
+  }
+  if (!deviceStatus) {
+    Serial.println("Device is disabled, skipping sensor data transmission");
+    return;
+  }
+
   for (int i = 0; i < sensorCount; i++) {
     if (sensors[i].type == "DHT" && dhtInstance) {
       float temperature = dhtInstance->readTemperature();
