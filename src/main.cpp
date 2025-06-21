@@ -91,6 +91,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
           sensors[sensorCount].dht->begin();
         } else if (sensors[sensorCount].type == "MQ2") {
           pinMode(sensors[sensorCount].pin, INPUT);
+        } else if (sensors[sensorCount].type == "BUZZER") {
+          pinMode(sensors[sensorCount].pin, OUTPUT); // Cấu hình BUZZER pin là output
+          digitalWrite(sensors[sensorCount].pin, LOW); // Tắt BUZZER mặc định
         }
         sensorCount++;
       }
@@ -132,6 +135,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
           Serial.print(sensors[i].name);
           Serial.print(" status updated to: ");
           Serial.println(newStatus);
+          if (sensors[i].type == "BUZZER") {
+            digitalWrite(sensors[i].pin, newStatus ? HIGH : LOW);
+          }
         }
         break;
       }
@@ -224,9 +230,21 @@ void sendSensorData() {
         serializeJson(doc, buffer);
         client.publish("sensor/data", buffer);
       }
-      Serial.print("Gas Sensor ");
-      Serial.print(": ");
+      Serial.print("Gas Sensor: ");
       Serial.println(gasValue);
+
+      for (int j = 0; j < sensorCount; j++) {
+        if (sensors[j].type == "BUZZER" && sensors[j].status) {
+          if (gasValue >= sensors[i].threshold) {
+            digitalWrite(sensors[j].pin, HIGH); // Bật còi
+            Serial.println("BUZZER ON: Gas level exceeded threshold!");
+          } else {
+            digitalWrite(sensors[j].pin, LOW); // Tắt còi
+            Serial.println("BUZZER OFF: Gas level below threshold");
+          }
+          break;
+        }
+      }
     }
   }
 }
