@@ -3,10 +3,10 @@
 #include <ArduinoJson.h>
 #include <DHT.h>
 
-const char* ssid = "Huong Duong";
-const char* password = "20122000";
+const char* ssid = "tem";
+const char* password = "123456789";
 
-const char* mqtt_server = "192.168.1.10";
+const char* mqtt_server = "192.168.114.75";
 const int mqtt_port = 1883;
 const char* mqtt_user = "";
 const char* mqtt_password = "";
@@ -267,5 +267,5 @@ void loop() {
   }
   client.loop();
   sendSensorData();
-  delay(2000);
+  delay(5000);
 }
